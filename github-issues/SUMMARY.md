@@ -18,6 +18,11 @@ This document summarizes the GitHub issues and pull requests for upstreaming our
 **Title**: [Bug] fused_qk_norm_rope API breaking change between rc4 and rc5 (15 vs 16 arguments)
 **Status**: CREATED
 
+### 3. NVIDIA/TensorRT-LLM - ABI Compatibility Bug
+**URL**: https://github.com/NVIDIA/TensorRT-LLM/issues/10016
+**Title**: [Bug] ABI incompatibility causes segfault when mixing rc4/rc5 binaries
+**Status**: CREATED
+
 ---
 
 ## Issues Pending (Repo Not Public)
