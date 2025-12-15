@@ -1,0 +1,42 @@
+# Build artifacts
+*.pyc
+__pycache__/
+*.egg-info/
+dist/
+build/
+
+# Database files (pre-existing content)
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+catalog/
+inventory/
+mirror/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+*.tar
+*.tar.gz
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+
+# Kubernetes
+kubeconfig
+*.kubeconfig
+
+# Secrets (never commit)
+*.pem
+*.key
+secrets.yaml
+*-secrets.yaml

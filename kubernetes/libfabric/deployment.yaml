@@ -1,0 +1,336 @@
+# Dynamo TensorRT-LLM Disaggregated Deployment with LIBFABRIC Backend
+#
+# Architecture: 1 Frontend + 1 Prefill Worker + 1 Decode Worker
+# Model: Qwen/Qwen3-0.6B (configurable)
+# KV Cache Transfer: NIXL with LIBFABRIC backend over AWS EFA
+#
+# Prerequisites:
+# 1. NVIDIA Dynamo operator installed
+# 2. ConfigMap 'trtllm-config' applied
+# 3. AWS EKS with p5.48xlarge nodes (H100 + EFA)
+#
+# Usage:
+#   kubectl apply -f ../common/configmap.yaml
+#   kubectl apply -f deployment.yaml
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: trtllm-libfabric
+  namespace: default
+spec:
+  services:
+    # ========================================
+    # Frontend - HTTP API server
+    # ========================================
+    Frontend:
+      dynamoNamespace: trtllm-libfabric
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: public.ecr.aws/v9l4g5s4/dynamo-trtllm:h100-v28-full-libfabric
+          imagePullPolicy: Always
+          command:
+          - /bin/sh
+          - -c
+          args:
+          - python3 -m dynamo.frontend --http-port 8000 --http-host 0.0.0.0
+          resources:
+            limits:
+              cpu: "2"
+              memory: 4Gi
+              nvidia.com/gpu: "0"
+              vpc.amazonaws.com/efa: "0"
+            requests:
+              cpu: "2"
+              memory: 4Gi
+              nvidia.com/gpu: "0"
+              vpc.amazonaws.com/efa: "0"
+      envs:
+        - name: DYN_ROUTER_MODE
+          value: "kv"
+        - name: BACKEND_MODULE
+          value: "dynamo.trtllm"
+
+    # ========================================
+    # Prefill Worker - processes input tokens
+    # ========================================
+    TrtllmPrefillWorker:
+      dynamoNamespace: trtllm-libfabric
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      extraPodSpec:
+        nodeSelector:
+          node.kubernetes.io/instance-type: ml.p5.48xlarge
+        mainContainer:
+          image: public.ecr.aws/v9l4g5s4/dynamo-trtllm:h100-v28-full-libfabric
+          imagePullPolicy: Always
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_RESOURCE
+              - NET_ADMIN
+              - SYS_ADMIN
+            privileged: true
+          command:
+          - /bin/bash
+          - -c
+          args:
+            - |
+              echo "=== TRT-LLM Prefill Worker with LIBFABRIC ==="
+
+              # Install libzmq5 for TRT-LLM cache transceiver
+              apt-get update -qq && apt-get install -y -qq libzmq5 && ldconfig
+
+              # Verify EFA devices
+              echo "=== EFA Devices ==="
+              ibv_devices || echo "No IB devices"
+              ls -la /dev/infiniband/ || echo "No /dev/infiniband mount"
+
+              # Verify GPU
+              echo "=== GPU Check ==="
+              nvidia-smi -L
+
+              # Start prefill worker
+              source /opt/dynamo/venv/bin/activate
+              exec python -m dynamo.trtllm \
+                --model-path Qwen/Qwen3-0.6B \
+                --disaggregation-mode prefill \
+                --extra-engine-args /config/trtllm-prefill-config.yaml
+          resources:
+            limits:
+              cpu: "16"
+              memory: 64Gi
+              nvidia.com/gpu: "1"
+              vpc.amazonaws.com/efa: "1"
+              hugepages-2Mi: 5120Mi
+            requests:
+              cpu: "16"
+              memory: 64Gi
+              nvidia.com/gpu: "1"
+              vpc.amazonaws.com/efa: "1"
+              hugepages-2Mi: 5120Mi
+          volumeMounts:
+          - name: trtllm-config
+            mountPath: /config
+            readOnly: true
+          - name: dev-infiniband
+            mountPath: /dev/infiniband
+          - name: hugepages
+            mountPath: /dev/hugepages
+        volumes:
+        - name: trtllm-config
+          configMap:
+            name: trtllm-config
+        - name: dev-infiniband
+          hostPath:
+            path: /dev/infiniband
+            type: DirectoryOrCreate
+        - name: hugepages
+          emptyDir:
+            medium: HugePages
+      envs:
+        - name: LC_ALL
+          value: "C.UTF-8"
+        - name: LANG
+          value: "C.UTF-8"
+        - name: PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION
+          value: "python"
+
+        # NIXL Side Channel - MUST use Pod IP for cross-node
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: NIXL_SIDE_CHANNEL_HOST
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: NIXL_SIDE_CHANNEL_PORT
+          value: "5600"
+
+        # NIXL Backend Selection - LIBFABRIC for EFA
+        - name: NIXL_BACKEND
+          value: "LIBFABRIC"
+
+        # Library paths
+        - name: LD_LIBRARY_PATH
+          value: "/opt/amazon/openmpi/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64:/opt/amazon/efa/lib:/usr/local/ucx/lib:/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu"
+
+        # LIBFABRIC/EFA Configuration
+        - name: FI_PROVIDER
+          value: "efa"
+        - name: FI_EFA_USE_DEVICE_RDMA
+          value: "1"
+        - name: FI_HMEM_DISABLE_P2P
+          value: "1"
+        - name: FI_EFA_ENABLE_SHM
+          value: "0"
+        - name: FI_MR_CACHE_MAX_COUNT
+          value: "0"
+        - name: FI_MR_CACHE_MONITOR
+          value: "disabled"
+        - name: FI_EFA_TX_SIZE
+          value: "8192"
+        - name: FI_EFA_RX_SIZE
+          value: "8192"
+        - name: FI_EFA_CQ_SIZE
+          value: "16384"
+        - name: FI_EFA_FORK_SAFE
+          value: "1"
+        - name: RDMAV_FORK_SAFE
+          value: "1"
+        - name: FI_LOG_LEVEL
+          value: "warn"
+
+        # UCX Configuration (for NCCL, not NIXL)
+        - name: UCX_TLS
+          value: "tcp,srd,cuda_copy,cuda_ipc,sm,self"
+        - name: UCX_NET_DEVICES
+          value: "all"
+        - name: UCX_IB_GPU_DIRECT_RDMA
+          value: "yes"
+
+    # ========================================
+    # Decode Worker - generates output tokens
+    # ========================================
+    TrtllmDecodeWorker:
+      dynamoNamespace: trtllm-libfabric
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      extraPodSpec:
+        nodeSelector:
+          node.kubernetes.io/instance-type: ml.p5.48xlarge
+        mainContainer:
+          image: public.ecr.aws/v9l4g5s4/dynamo-trtllm:h100-v28-full-libfabric
+          imagePullPolicy: Always
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_RESOURCE
+              - NET_ADMIN
+              - SYS_ADMIN
+            privileged: true
+          command:
+          - /bin/bash
+          - -c
+          args:
+            - |
+              echo "=== TRT-LLM Decode Worker with LIBFABRIC ==="
+
+              # Install libzmq5 for TRT-LLM cache transceiver
+              apt-get update -qq && apt-get install -y -qq libzmq5 && ldconfig
+
+              # Verify EFA devices
+              echo "=== EFA Devices ==="
+              ibv_devices || echo "No IB devices"
+              ls -la /dev/infiniband/ || echo "No /dev/infiniband mount"
+
+              # Verify GPU
+              echo "=== GPU Check ==="
+              nvidia-smi -L
+
+              # Start decode worker
+              source /opt/dynamo/venv/bin/activate
+              exec python -m dynamo.trtllm \
+                --model-path Qwen/Qwen3-0.6B \
+                --disaggregation-mode decode \
+                --extra-engine-args /config/trtllm-decode-config.yaml
+          resources:
+            limits:
+              cpu: "16"
+              memory: 64Gi
+              nvidia.com/gpu: "1"
+              vpc.amazonaws.com/efa: "1"
+              hugepages-2Mi: 5120Mi
+            requests:
+              cpu: "16"
+              memory: 64Gi
+              nvidia.com/gpu: "1"
+              vpc.amazonaws.com/efa: "1"
+              hugepages-2Mi: 5120Mi
+          volumeMounts:
+          - name: trtllm-config
+            mountPath: /config
+            readOnly: true
+          - name: dev-infiniband
+            mountPath: /dev/infiniband
+          - name: hugepages
+            mountPath: /dev/hugepages
+        volumes:
+        - name: trtllm-config
+          configMap:
+            name: trtllm-config
+        - name: dev-infiniband
+          hostPath:
+            path: /dev/infiniband
+            type: DirectoryOrCreate
+        - name: hugepages
+          emptyDir:
+            medium: HugePages
+      envs:
+        - name: LC_ALL
+          value: "C.UTF-8"
+        - name: LANG
+          value: "C.UTF-8"
+        - name: PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION
+          value: "python"
+
+        # NIXL Side Channel - MUST use Pod IP for cross-node
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: NIXL_SIDE_CHANNEL_HOST
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: NIXL_SIDE_CHANNEL_PORT
+          value: "5600"
+
+        # NIXL Backend Selection - LIBFABRIC for EFA
+        - name: NIXL_BACKEND
+          value: "LIBFABRIC"
+
+        # Library paths
+        - name: LD_LIBRARY_PATH
+          value: "/opt/amazon/openmpi/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64:/opt/amazon/efa/lib:/usr/local/ucx/lib:/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu"
+
+        # LIBFABRIC/EFA Configuration
+        - name: FI_PROVIDER
+          value: "efa"
+        - name: FI_EFA_USE_DEVICE_RDMA
+          value: "1"
+        - name: FI_HMEM_DISABLE_P2P
+          value: "1"
+        - name: FI_EFA_ENABLE_SHM
+          value: "0"
+        - name: FI_MR_CACHE_MAX_COUNT
+          value: "0"
+        - name: FI_MR_CACHE_MONITOR
+          value: "disabled"
+        - name: FI_EFA_TX_SIZE
+          value: "8192"
+        - name: FI_EFA_RX_SIZE
+          value: "8192"
+        - name: FI_EFA_CQ_SIZE
+          value: "16384"
+        - name: FI_EFA_FORK_SAFE
+          value: "1"
+        - name: RDMAV_FORK_SAFE
+          value: "1"
+        - name: FI_LOG_LEVEL
+          value: "warn"
+
+        # UCX Configuration (for NCCL, not NIXL)
+        - name: UCX_TLS
+          value: "tcp,srd,cuda_copy,cuda_ipc,sm,self"
+        - name: UCX_NET_DEVICES
+          value: "all"
+        - name: UCX_IB_GPU_DIRECT_RDMA
+          value: "yes"

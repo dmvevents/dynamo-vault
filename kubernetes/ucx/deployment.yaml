@@ -1,0 +1,238 @@
+# Dynamo TensorRT-LLM Disaggregated Deployment with UCX Backend
+#
+# Architecture: 1 Frontend + 1 Prefill Worker + 1 Decode Worker
+# Model: Qwen/Qwen3-0.6B (configurable)
+# KV Cache Transfer: NIXL with UCX backend (TCP, InfiniBand, RoCE)
+#
+# Prerequisites:
+# 1. NVIDIA Dynamo operator installed
+# 2. ConfigMap 'trtllm-config' applied
+# 3. GPU nodes (any instance type with NVIDIA GPUs)
+#
+# Usage:
+#   kubectl apply -f ../common/configmap.yaml
+#   kubectl apply -f deployment.yaml
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: trtllm-ucx
+  namespace: default
+spec:
+  services:
+    # ========================================
+    # Frontend - HTTP API server
+    # ========================================
+    Frontend:
+      dynamoNamespace: trtllm-ucx
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: public.ecr.aws/v9l4g5s4/dynamo-trtllm:h100-v19-flashinfer-stub
+          imagePullPolicy: Always
+          command:
+          - /bin/sh
+          - -c
+          args:
+          - python3 -m dynamo.frontend --http-port 8000 --http-host 0.0.0.0
+          resources:
+            limits:
+              cpu: "2"
+              memory: 4Gi
+              nvidia.com/gpu: "0"
+            requests:
+              cpu: "2"
+              memory: 4Gi
+              nvidia.com/gpu: "0"
+      envs:
+        - name: DYN_ROUTER_MODE
+          value: "kv"
+        - name: BACKEND_MODULE
+          value: "dynamo.trtllm"
+
+    # ========================================
+    # Prefill Worker - processes input tokens
+    # ========================================
+    TrtllmPrefillWorker:
+      dynamoNamespace: trtllm-ucx
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: public.ecr.aws/v9l4g5s4/dynamo-trtllm:h100-v19-flashinfer-stub
+          imagePullPolicy: Always
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_RESOURCE
+            privileged: true
+          command:
+          - /bin/bash
+          - -c
+          args:
+            - |
+              echo "=== TRT-LLM Prefill Worker with UCX ==="
+
+              # Install libzmq5 for TRT-LLM cache transceiver
+              apt-get update -qq && apt-get install -y -qq libzmq5 && ldconfig
+
+              # Verify GPU
+              echo "=== GPU Check ==="
+              nvidia-smi -L
+
+              # Start prefill worker
+              source /opt/dynamo/venv/bin/activate
+              exec python -m dynamo.trtllm \
+                --model-path Qwen/Qwen3-0.6B \
+                --disaggregation-mode prefill \
+                --extra-engine-args /config/trtllm-prefill-config.yaml
+          resources:
+            limits:
+              cpu: "16"
+              memory: 64Gi
+              nvidia.com/gpu: "1"
+            requests:
+              cpu: "16"
+              memory: 64Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+          - name: trtllm-config
+            mountPath: /config
+            readOnly: true
+        volumes:
+        - name: trtllm-config
+          configMap:
+            name: trtllm-config
+      envs:
+        - name: LC_ALL
+          value: "C.UTF-8"
+        - name: LANG
+          value: "C.UTF-8"
+        - name: PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION
+          value: "python"
+
+        # NIXL Side Channel - MUST use Pod IP for cross-node
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: NIXL_SIDE_CHANNEL_HOST
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: NIXL_SIDE_CHANNEL_PORT
+          value: "5600"
+
+        # NIXL Backend Selection - UCX (default)
+        - name: NIXL_BACKEND
+          value: "UCX"
+
+        # Library paths
+        - name: LD_LIBRARY_PATH
+          value: "/usr/local/nvidia/lib64:/usr/local/cuda/lib64:/usr/local/ucx/lib:/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu"
+
+        # UCX Configuration
+        - name: UCX_TLS
+          value: "tcp,srd,cuda_copy,cuda_ipc,sm,self"
+        - name: UCX_NET_DEVICES
+          value: "all"
+        - name: UCX_IB_GPU_DIRECT_RDMA
+          value: "yes"
+        - name: UCX_LOG_LEVEL
+          value: "warn"
+
+    # ========================================
+    # Decode Worker - generates output tokens
+    # ========================================
+    TrtllmDecodeWorker:
+      dynamoNamespace: trtllm-ucx
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: public.ecr.aws/v9l4g5s4/dynamo-trtllm:h100-v19-flashinfer-stub
+          imagePullPolicy: Always
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_RESOURCE
+            privileged: true
+          command:
+          - /bin/bash
+          - -c
+          args:
+            - |
+              echo "=== TRT-LLM Decode Worker with UCX ==="
+
+              # Install libzmq5 for TRT-LLM cache transceiver
+              apt-get update -qq && apt-get install -y -qq libzmq5 && ldconfig
+
+              # Verify GPU
+              echo "=== GPU Check ==="
+              nvidia-smi -L
+
+              # Start decode worker
+              source /opt/dynamo/venv/bin/activate
+              exec python -m dynamo.trtllm \
+                --model-path Qwen/Qwen3-0.6B \
+                --disaggregation-mode decode \
+                --extra-engine-args /config/trtllm-decode-config.yaml
+          resources:
+            limits:
+              cpu: "16"
+              memory: 64Gi
+              nvidia.com/gpu: "1"
+            requests:
+              cpu: "16"
+              memory: 64Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+          - name: trtllm-config
+            mountPath: /config
+            readOnly: true
+        volumes:
+        - name: trtllm-config
+          configMap:
+            name: trtllm-config
+      envs:
+        - name: LC_ALL
+          value: "C.UTF-8"
+        - name: LANG
+          value: "C.UTF-8"
+        - name: PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION
+          value: "python"
+
+        # NIXL Side Channel - MUST use Pod IP for cross-node
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: NIXL_SIDE_CHANNEL_HOST
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: NIXL_SIDE_CHANNEL_PORT
+          value: "5600"
+
+        # NIXL Backend Selection - UCX (default)
+        - name: NIXL_BACKEND
+          value: "UCX"
+
+        # Library paths
+        - name: LD_LIBRARY_PATH
+          value: "/usr/local/nvidia/lib64:/usr/local/cuda/lib64:/usr/local/ucx/lib:/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu"
+
+        # UCX Configuration
+        - name: UCX_TLS
+          value: "tcp,srd,cuda_copy,cuda_ipc,sm,self"
+        - name: UCX_NET_DEVICES
+          value: "all"
+        - name: UCX_IB_GPU_DIRECT_RDMA
+          value: "yes"
+        - name: UCX_LOG_LEVEL
+          value: "warn"

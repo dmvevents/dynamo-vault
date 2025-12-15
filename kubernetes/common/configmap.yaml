@@ -1,0 +1,81 @@
+# ConfigMap for TRT-LLM Engine Arguments
+# Used by both prefill and decode workers
+#
+# Key settings:
+# - cache_transceiver_config.backend: NIXL (enables KV cache transfer)
+# - kv_cache_config.free_gpu_memory_fraction: 0.5 (leaves room for model)
+# - build_config: Optimized for Qwen/Qwen3-0.6B
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trtllm-config
+  namespace: default
+data:
+  trtllm-prefill-config.yaml: |
+    # TRT-LLM Prefill Worker Configuration
+    scheduler_config:
+      capacity_scheduler_policy: GUARANTEED_NO_EVICT
+      dynamic_batch_config:
+        enable_batch_size_tuning: true
+        enable_max_num_tokens_tuning: false
+        dynamic_batch_moving_average_window: 128
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    backend: pytorch
+    build_config:
+      max_input_len: 1024
+      max_seq_len: 4096
+      opt_batch_size: 8
+      max_batch_size: 16
+      max_num_tokens: 2048
+      max_beam_width: 1
+    kv_cache_config:
+      free_gpu_memory_fraction: 0.5
+    gpus_per_node: 8
+    max_num_tokens: 2048
+    max_seq_len: 4096
+    max_beam_width: 1
+    max_batch_size: 16
+    return_perf_metrics: false
+    trust_remote_code: true
+    enable_chunked_prefill: true
+    disable_overlap_scheduler: true
+    # CRITICAL: NIXL backend for KV cache transfer
+    cache_transceiver_config:
+      backend: NIXL
+      max_tokens_in_buffer: 4096
+
+  trtllm-decode-config.yaml: |
+    # TRT-LLM Decode Worker Configuration
+    scheduler_config:
+      capacity_scheduler_policy: GUARANTEED_NO_EVICT
+      dynamic_batch_config:
+        enable_batch_size_tuning: true
+        enable_max_num_tokens_tuning: false
+        dynamic_batch_moving_average_window: 128
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    backend: pytorch
+    build_config:
+      max_input_len: 1024
+      max_seq_len: 4096
+      opt_batch_size: 8
+      max_batch_size: 16
+      max_num_tokens: 2048
+      max_beam_width: 1
+    kv_cache_config:
+      free_gpu_memory_fraction: 0.5
+    gpus_per_node: 8
+    max_num_tokens: 2048
+    max_seq_len: 4096
+    max_beam_width: 1
+    max_batch_size: 16
+    return_perf_metrics: false
+    trust_remote_code: true
+    enable_chunked_prefill: true
+    disable_overlap_scheduler: true
+    # CRITICAL: NIXL backend for KV cache transfer
+    cache_transceiver_config:
+      backend: NIXL
+      max_tokens_in_buffer: 4096
