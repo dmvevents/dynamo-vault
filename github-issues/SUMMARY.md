@@ -2,11 +2,25 @@
 
 ## Overview
 
-This document summarizes the GitHub issues and pull requests to be created for upstreaming our LIBFABRIC/EFA solution.
+This document summarizes the GitHub issues and pull requests for upstreaming our LIBFABRIC/EFA solution.
 
 ---
 
-## Issues to Create
+## Issues Created
+
+### 1. NVIDIA/TensorRT-LLM - Documentation Request
+**URL**: https://github.com/NVIDIA/TensorRT-LLM/issues/10014
+**Title**: [Documentation] AWS EFA/LIBFABRIC deployment guide for disaggregated inference
+**Status**: CREATED
+
+### 2. NVIDIA/TensorRT-LLM - API Compatibility Bug
+**URL**: https://github.com/NVIDIA/TensorRT-LLM/issues/10015
+**Title**: [Bug] fused_qk_norm_rope API breaking change between rc4 and rc5 (15 vs 16 arguments)
+**Status**: CREATED
+
+---
+
+## Issues Pending (Repo Not Public)
 
 ### 1. NVIDIA/dynamo - Feature Request
 **File**: `DYNAMO_ISSUE.md`
@@ -16,15 +30,7 @@ This document summarizes the GitHub issues and pull requests to be created for u
 **Summary**: Dynamo's nixl_connect always uses UCX backend, ignoring NIXL_BACKEND env var. This prevents using LIBFABRIC on AWS EFA.
 
 **Action**: Feature request for environment variable support
-
-### 2. NVIDIA/TensorRT-LLM - Documentation
-**File**: `TRTLLM_ISSUE.md`
-
-**Title**: [Documentation] AWS EFA/LIBFABRIC deployment guide for disaggregated inference
-
-**Summary**: Request for documentation on deploying TRT-LLM with LIBFABRIC on AWS EFA, including environment variables, Kubernetes configuration, and Dynamo integration.
-
-**Action**: Documentation request
+**Status**: PENDING - NVIDIA/dynamo repo not publicly available
 
 ---
 
