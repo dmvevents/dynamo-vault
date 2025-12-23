@@ -1,0 +1,83 @@
+# ConfigMap for TensorRT-LLM Disaggregated Workers with NIXL/LIBFABRIC
+# Apply with: kubectl apply -f configmap-trtllm-config.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trtllm-config-cuda13-nixl
+  namespace: default
+data:
+  trtllm-prefill-config.yaml: |
+    # TensorRT-LLM Prefill Worker Configuration - H100 with NIXL/LIBFABRIC
+    # Model: Qwen/Qwen3-0.6B
+    # KV cache transfer via NIXL with LIBFABRIC backend over EFA
+    # Requires: NIXL_BACKEND=LIBFABRIC env var
+
+    backend: pytorch
+
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+
+    max_batch_size: 16
+    max_num_tokens: 2048
+    max_seq_len: 4096
+
+    trust_remote_code: true
+
+    kv_cache_config:
+      free_gpu_memory_fraction: 0.5
+
+    enable_chunked_prefill: true
+    disable_overlap_scheduler: true
+
+    # KV cache transfer via NIXL (uses NIXL_BACKEND=LIBFABRIC env var)
+    cache_transceiver_config:
+      backend: NIXL
+      max_tokens_in_buffer: 4096
+
+  trtllm-decode-config.yaml: |
+    # TensorRT-LLM Decode Worker Configuration - H100 with NIXL/LIBFABRIC
+    # Model: Qwen/Qwen3-0.6B
+    # KV cache transfer via NIXL with LIBFABRIC backend over EFA
+    # Requires: NIXL_BACKEND=LIBFABRIC env var
+    #
+    # NOTE: v45 fix - reduced free_gpu_memory_fraction from 0.8 to 0.5
+    # The decode worker was hitting GPU OOM because:
+    # - Total GPU memory: 79.18 GiB
+    # - After model loading, only ~0.92 GiB was free
+    # - 0.8 * 79.18 GiB = ~63 GiB was requested for KV cache
+    # - This caused "Executor creation failed due to insufficient GPU memory"
+    # Reducing to 0.5 allows the decode worker to start successfully.
+
+    backend: pytorch
+
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+
+    max_batch_size: 256
+    max_num_tokens: 256
+    max_seq_len: 4096
+
+    trust_remote_code: true
+
+    kv_cache_config:
+      free_gpu_memory_fraction: 0.5
+
+    enable_chunked_prefill: true
+    disable_overlap_scheduler: false
+
+    cuda_graph_config:
+      batch_sizes:
+        - 1
+        - 2
+        - 4
+        - 8
+        - 16
+        - 32
+        - 64
+        - 128
+        - 256
+
+    # KV cache transfer via NIXL (uses NIXL_BACKEND=LIBFABRIC env var)
+    cache_transceiver_config:
+      backend: NIXL
+      max_tokens_in_buffer: 4096

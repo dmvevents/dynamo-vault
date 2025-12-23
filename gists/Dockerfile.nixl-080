@@ -1,0 +1,148 @@
+# Dockerfile for building NIXL 0.8.0 with K8s LIBFABRIC compatibility
+#
+# This Dockerfile builds NIXL 0.8.0 from GitHub to fix metadata corruption
+# issues present in NIXL 0.7.1 bundled with TRT-LLM.
+#
+# Key fixes in 0.8.0:
+# - PR #883: Offset calculation fixes in libfabric metadata exchange
+# - PR #908: Asymmetrical rail configuration fixes
+# - PR #969, #976, #978, #986: Additional libfabric backend stability
+#
+# Build: docker build -f Dockerfile.nixl-080 -t dynamo-trtllm:v53-nixl-080 .
+#
+FROM dynamo-trtllm:h100-v36-dynamo-efa-rc5-cuda13-devel
+
+# Run as root for package installation
+USER root
+
+# Install build dependencies
+RUN mkdir -p /var/lib/apt/lists/partial && \
+    apt-get update && apt-get install -y \
+    git \
+    meson \
+    ninja-build \
+    pkg-config \
+    libhwloc-dev \
+    libnuma-dev \
+    libaio-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone NIXL 0.8.0 from GitHub
+WORKDIR /tmp
+RUN git clone --depth 1 --branch 0.8.0 https://github.com/ai-dynamo/nixl.git nixl-080
+
+# Build NIXL with meson
+WORKDIR /tmp/nixl-080
+RUN meson setup build \
+    --buildtype=release \
+    --prefix=/opt/nvidia/nvda_nixl \
+    -Dlibfabric_path=/opt/amazon/efa \
+    -Ducx_path=/usr/local/ucx \
+    -Dbuild_tests=false \
+    -Dbuild_examples=false \
+    && cd build \
+    && ninja \
+    && ninja install
+
+# Clean up build artifacts
+RUN rm -rf /tmp/nixl-080
+
+WORKDIR /
+
+# ============================================================================
+# Copy NIXL 0.8.0 to TRT-LLM's bundled location
+# TRT-LLM's libtensorrt_llm_nixl_wrapper.so loads NIXL from its bundled path
+# at /opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/libs/nixl/
+# We must REPLACE the bundled NIXL with our 0.8.0 version
+# ============================================================================
+
+# Create backup of original NIXL (for debugging if needed)
+RUN mkdir -p /opt/nvidia/nvda_nixl_backup && \
+    cp -r /opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/libs/nixl/* \
+          /opt/nvidia/nvda_nixl_backup/ 2>/dev/null || true
+
+# Copy ALL NIXL 0.8.0 libraries to TRT-LLM's bundled location
+RUN cp -v /opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/libnixl*.so* \
+          /opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/libs/nixl/ && \
+    cp -v /opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/libserdes.so \
+          /opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/libs/nixl/ && \
+    cp -v /opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/libstream.so \
+          /opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/libs/nixl/ && \
+    cp -v /opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/libucx_utils.so \
+          /opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/libs/nixl/ && \
+    cp -v /opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/libfile_utils.so \
+          /opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/libs/nixl/ && \
+    echo "All NIXL 0.8.0 libraries copied to TRT-LLM bundled location"
+
+# CRITICAL FIX (Dec 23, 2025): Copy LIBFABRIC plugin to TRT-LLM's plugins directory
+# TRT-LLM loads plugins from tensorrt_llm/libs/nixl/plugins/ - this was MISSING!
+RUN cp -v /opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/plugins/libplugin_LIBFABRIC.so \
+          /opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/libs/nixl/plugins/ && \
+    echo "LIBFABRIC plugin copied to TRT-LLM bundled plugins directory"
+
+# Also ensure LD_LIBRARY_PATH prioritizes our NIXL 0.8.0
+ENV LD_LIBRARY_PATH="/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu:/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/libs/nixl:${LD_LIBRARY_PATH}"
+
+# Verify the copy was successful
+RUN ls -la /opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/libs/nixl/
+
+# ============================================================================
+# Copy NIXL 0.8.0 to Python nixl_cu13 package locations
+# ============================================================================
+
+# Patch the Python .nixl_cu13.mesonpy.libs/ directory
+RUN cp -v /opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/libnixl*.so* \
+          /opt/dynamo/venv/lib/python3.12/site-packages/.nixl_cu13.mesonpy.libs/ && \
+    cp -v /opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/libserdes.so \
+          /opt/dynamo/venv/lib/python3.12/site-packages/.nixl_cu13.mesonpy.libs/ && \
+    cp -v /opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/libstream.so \
+          /opt/dynamo/venv/lib/python3.12/site-packages/.nixl_cu13.mesonpy.libs/ && \
+    cp -v /opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/libucx_utils.so \
+          /opt/dynamo/venv/lib/python3.12/site-packages/.nixl_cu13.mesonpy.libs/ && \
+    cp -v /opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/libfile_utils.so \
+          /opt/dynamo/venv/lib/python3.12/site-packages/.nixl_cu13.mesonpy.libs/ && \
+    cp -v /opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/libnixl_common.so \
+          /opt/dynamo/venv/lib/python3.12/site-packages/.nixl_cu13.mesonpy.libs/ && \
+    echo "All NIXL 0.8.0 libraries copied to Python .nixl_cu13.mesonpy.libs"
+
+# Copy LIBFABRIC plugin to Python package
+RUN cp -v /opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/plugins/libplugin_LIBFABRIC.so \
+          /opt/dynamo/venv/lib/python3.12/site-packages/.nixl_cu13.mesonpy.libs/plugins/ && \
+    echo "LIBFABRIC plugin copied to Python nixl_cu13 package"
+
+# ============================================================================
+# Also patch nixl_cu13.libs/ (WITHOUT the leading dot)
+# ============================================================================
+
+# Patch nixl_cu13.libs/ main directory
+RUN cp -v /opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/libnixl_build.so \
+          /opt/dynamo/venv/lib/python3.12/site-packages/nixl_cu13.libs/libnixl_build-d94bd1c4.so && \
+    echo "Patched libnixl_build in nixl_cu13.libs/"
+
+# Patch nixl_cu13.libs/nixl/ plugins directory
+RUN cp -v /opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/plugins/libplugin_LIBFABRIC.so \
+          /opt/dynamo/venv/lib/python3.12/site-packages/nixl_cu13.libs/nixl/ && \
+    echo "Patched LIBFABRIC plugin in nixl_cu13.libs/nixl/"
+
+# Verify all SIX locations are patched (including TRT-LLM plugins)
+RUN echo "=== Location 1: /opt/nvidia/nvda_nixl ===" && \
+    ls -la /opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/plugins/libplugin_LIBFABRIC.so && \
+    echo "=== Location 2: TRT-LLM bundled NIXL libs ===" && \
+    ls -la /opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/libs/nixl/libserdes.so && \
+    echo "=== Location 2b: TRT-LLM bundled NIXL PLUGINS (CRITICAL!) ===" && \
+    ls -la /opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/libs/nixl/plugins/libplugin_LIBFABRIC.so && \
+    echo "=== Location 3: Python .nixl_cu13.mesonpy.libs ===" && \
+    ls -la /opt/dynamo/venv/lib/python3.12/site-packages/.nixl_cu13.mesonpy.libs/libserdes.so && \
+    ls -la /opt/dynamo/venv/lib/python3.12/site-packages/.nixl_cu13.mesonpy.libs/plugins/libplugin_LIBFABRIC.so && \
+    echo "=== Location 4+5: Python nixl_cu13.libs (without dot) ===" && \
+    ls -la /opt/dynamo/venv/lib/python3.12/site-packages/nixl_cu13.libs/libnixl_build-d94bd1c4.so && \
+    ls -la /opt/dynamo/venv/lib/python3.12/site-packages/nixl_cu13.libs/nixl/libplugin_LIBFABRIC.so && \
+    echo "=== ALL 6 NIXL LOCATIONS PATCHED WITH 0.8.0 (including TRT-LLM plugins) ==="
+
+# Labels
+LABEL maintainer="dynamo-testing"
+LABEL version="v55-nixl-080-libfabric"
+LABEL description="TRT-LLM with NIXL 0.8.0 + LIBFABRIC plugin in TRT-LLM plugins dir (Dec 23 fix)"
+LABEL nixl_version="0.8.0"
+LABEL fix_date="2025-12-23"
+LABEL fix_description="Added libplugin_LIBFABRIC.so to tensorrt_llm/libs/nixl/plugins/"
